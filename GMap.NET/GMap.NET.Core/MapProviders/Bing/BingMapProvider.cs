@@ -9,6 +9,7 @@ using System.Threading;
 using System.Xml;
 using GMap.NET.Internals;
 using GMap.NET.Projections;
+using Newtonsoft.Json;
 
 namespace GMap.NET.MapProviders
 {
@@ -708,18 +709,25 @@ namespace GMap.NET.MapProviders
         public GeoCoderStatusCode GetPlacemarks(PointLatLng location, out List<Placemark> placemarkList)
         {
             // http://msdn.microsoft.com/en-us/library/ff701713.aspx
-            throw new NotImplementedException();
+            return GetPlacemarkFromLocationUrl(location, out placemarkList);
         }
 
         public Placemark? GetPlacemark(PointLatLng location, out GeoCoderStatusCode status)
         {
             // http://msdn.microsoft.com/en-us/library/ff701713.aspx
-            throw new NotImplementedException();
+            List<Placemark> pointList;
+            status = GetPlacemarks(location, out pointList);
+            return pointList != null && pointList.Count > 0 ? pointList[0] : (Placemark?)null;
         }
 
         string MakeGeocoderUrl(string keywords)
         {
             return string.Format(CultureInfo.InvariantCulture, GeocoderUrlFormat, keywords, ClientKey);
+        }
+
+        string MakeLocationrUrl(string location)
+        {
+            return string.Format(CultureInfo.InvariantCulture, LocationUrlFormat, location, ClientKey);
         }
 
         GeoCoderStatusCode GetLatLngFromGeocoderUrl(string url, out List<PointLatLng> pointList)
@@ -820,8 +828,124 @@ namespace GMap.NET.MapProviders
             return status;
         }
 
+        GeoCoderStatusCode GetPlacemarkFromLocationUrl(PointLatLng location, out List<Placemark> placemarkList)
+        {
+            placemarkList = null;
+            string locString = string.Format("{0},{1}", location.Lat.ToString(), location.Lng.ToString());
+            string url = MakeLocationrUrl(locString);
+
+            var status = GeoCoderStatusCode.UNKNOWN_ERROR;
+
+            try
+            {
+                string geo = GMaps.Instance.UseGeocoderCache
+                    ? Cache.Instance.GetContent(url, CacheType.PlacemarkCache, TimeSpan.FromHours(TTLCache))
+                    : string.Empty;
+
+                bool cache = false;
+
+                if (string.IsNullOrEmpty(geo))
+                {
+                    geo = GetContentUsingHttp(url);
+
+                    if (!string.IsNullOrEmpty(geo))
+                    {
+                        cache = true;
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(geo))
+                {
+                    var bingLocResp = JsonConvert.DeserializeObject<GMap.NET.MapProviders.Bing.BingLocationResponse>(geo);
+
+                    string statuscode = bingLocResp.statusCode.ToString();
+
+                    switch (statuscode)
+                    {
+                        case "200":
+                            {
+                                placemarkList = new List<Placemark>();
+
+                                foreach(var set in bingLocResp.resourceSets)
+                                {
+                                    foreach(var resource in set.resources)
+                                    {
+                                        var ret = new Placemark(resource.address.formattedAddress);
+
+                                        Debug.WriteLine("formatted_address: [" + resource.address.formattedAddress + "]");
+
+                                        if (resource.entityType != null)
+                                        {
+                                            Debug.WriteLine("type: " + resource.entityType);
+                                        }
+
+                                        ret.ThoroughfareName = resource.address.addressLine;
+                                        ret.StreetAddress = resource.address.addressLine;
+                                        ret.PostalCodeNumber = resource.address.postalCode;
+                                        ret.CountryName = resource.address.countryRegion;
+                                        ret.LocalityName = resource.address.locality;
+                                        ret.DistrictName = resource.address.adminDistrict2;
+                                        ret.AdministrativeAreaName = resource.address.adminDistrict;
+
+                                        placemarkList.Add(ret);
+                                    }
+                                }
+
+                                if (placemarkList.Count > 0)
+                                {
+                                    status = GeoCoderStatusCode.OK;
+
+                                    if (cache && GMaps.Instance.UseGeocoderCache)
+                                    {
+                                        Cache.Instance.SaveContent(url, CacheType.PlacemarkCache, geo);
+                                    }
+
+                                    break;
+                                }
+
+                                status = GeoCoderStatusCode.ZERO_RESULTS;
+                                break;
+                            }
+
+                        case "400":
+                            status = GeoCoderStatusCode.INVALID_REQUEST;
+                            break; // bad request, The request contained an error.
+                        case "401":
+                            status = GeoCoderStatusCode.REQUEST_DENIED;
+                            break; // Unauthorized, Access was denied. You may have entered your credentials incorrectly, or you might not have access to the requested resource or operation.
+                        case "403":
+                            status = GeoCoderStatusCode.INVALID_REQUEST;
+                            break; // Forbidden, The request is for something forbidden. Authorization will not help.
+                        case "404":
+                            status = GeoCoderStatusCode.ZERO_RESULTS;
+                            break; // Not Found, The requested resource was not found. 
+                        case "500":
+                            status = GeoCoderStatusCode.ERROR;
+                            break; // Internal Server Error, Your request could not be completed because there was a problem with the service.
+                        case "501":
+                            status = GeoCoderStatusCode.UNKNOWN_ERROR;
+                            break; // Service Unavailable, There's a problem with the service right now. Please try again later.
+                        default:
+                            status = GeoCoderStatusCode.UNKNOWN_ERROR;
+                            break; // unknown, for possible future error codes
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                status = GeoCoderStatusCode.EXCEPTION_IN_CODE;
+                Debug.WriteLine("GetLatLngFromGeocoderUrl: " + ex);
+            }
+
+            return status;
+
+        }
+
         // http://dev.virtualearth.net/REST/v1/Locations/1%20Microsoft%20Way%20Redmond%20WA%2098052?o=xml&key=BingMapsKey
         static readonly string GeocoderUrlFormat = "http://dev.virtualearth.net/REST/v1/Locations?{0}&o=xml&key={1}";
+
+        // http://dev.virtualearth.net/REST/v1/Locations/{point}?includeEntityTypes={entityTypes}&includeNeighborhood={includeNeighborhood}&include={includeValue}&key={BingMapsKey}
+        static readonly string LocationUrlFormat = "http://dev.virtualearth.net/REST/v1/Locations/{0}?includeEntityTypes=Address,Neighborhood,PopulatedPlace,Postcode1,AdminDivision1,AdminDivision2,CountryRegion&includeNeighborhood=1&include=ciso2&key={1}&verboseplacenames=true";
 
         #endregion GeocodingProvider
     }
